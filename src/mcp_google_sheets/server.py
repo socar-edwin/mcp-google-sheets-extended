@@ -2831,12 +2831,17 @@ def main():
         print(f"Tool filtering enabled. Active tools: {', '.join(sorted(ENABLED_TOOLS))}")
     else:
         print("Tool filtering disabled. All tools are enabled.")
-    
+
     # Run the server
+    # Supported transports: stdio, sse, streamable-http
     transport = "stdio"
     for i, arg in enumerate(sys.argv):
         if arg == "--transport" and i + 1 < len(sys.argv):
             transport = sys.argv[i + 1]
             break
+
+    # Normalize transport aliases
+    transport_aliases = {"http": "streamable-http", "streamable_http": "streamable-http"}
+    transport = transport_aliases.get(transport, transport)
 
     mcp.run(transport=transport)
