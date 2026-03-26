@@ -1,6 +1,6 @@
 [project]
 name = "mcp-google-sheets-extended"
-version = "0.7.0"
+version = "0.7.1"
 description = "Extended Google Sheets MCP server — upload Excel, export, formatting, pivot tables, comments, and more. Based on mcp-google-sheets by Xing Wu."
 readme = "README.md"
 requires-python = ">=3.10"

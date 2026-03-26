@@ -140,12 +140,13 @@ async def spreadsheet_lifespan(server: FastMCP) -> AsyncIterator[SpreadsheetCont
             print(f"Successfully authenticated using ADC for project: {project}")
         except Exception as e:
             print(f"Error using Application Default Credentials: {e}")
-            raise Exception("All authentication methods failed. Please configure credentials.")
-    
-    # Build the services
-    sheets_service = build('sheets', 'v4', credentials=creds)
-    drive_service = build('drive', 'v3', credentials=creds)
-    
+            print("WARNING: No authentication configured. Server will start but API calls will fail.")
+            print("Please configure SERVICE_ACCOUNT_PATH, CREDENTIALS_PATH, or gcloud ADC.")
+
+    # Build the services (or None if no creds)
+    sheets_service = build('sheets', 'v4', credentials=creds) if creds else None
+    drive_service = build('drive', 'v3', credentials=creds) if creds else None
+
     try:
         # Provide the service in the context
         yield SpreadsheetContext(
