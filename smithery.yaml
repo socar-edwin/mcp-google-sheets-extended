@@ -1,0 +1,30 @@
+startCommand:
+  type: stdio
+  configSchema:
+    type: object
+    properties:
+      SERVICE_ACCOUNT_PATH:
+        type: string
+        title: "Service Account Key Path"
+        description: "Path to Google service account JSON key file"
+      CREDENTIALS_PATH:
+        type: string
+        title: "OAuth Credentials Path"
+        description: "Path to OAuth client credentials JSON file"
+      DRIVE_FOLDER_ID:
+        type: string
+        title: "Drive Folder ID"
+        description: "Optional Google Drive folder ID to scope operations"
+  commandFunction:
+    |-
+    (config) => ({
+      command: 'uvx',
+      args: ['mcp-google-sheets-extended@latest'],
+      env: {
+        ...(config.SERVICE_ACCOUNT_PATH ? { SERVICE_ACCOUNT_PATH: config.SERVICE_ACCOUNT_PATH } : {}),
+        ...(config.CREDENTIALS_PATH ? { CREDENTIALS_PATH: config.CREDENTIALS_PATH } : {}),
+        ...(config.DRIVE_FOLDER_ID ? { DRIVE_FOLDER_ID: config.DRIVE_FOLDER_ID } : {})
+      }
+    })
+  exampleConfig:
+    SERVICE_ACCOUNT_PATH: "/path/to/service-account.json"

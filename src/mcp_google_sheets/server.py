@@ -1687,6 +1687,1143 @@ def add_chart(spreadsheet_id: str,
         }
 
 
+# =============================================================================
+# Extended tools (added by mcp-google-sheets-extended)
+# =============================================================================
+
+@tool(
+    annotations=ToolAnnotations(
+        title="Upload Excel File",
+        destructiveHint=True,
+    ),
+)
+def upload_excel(
+    file_path: str,
+    title: Optional[str] = None,
+    folder_id: Optional[str] = None,
+    ctx: Context = None,
+) -> Dict[str, Any]:
+    """
+    Upload an Excel (.xlsx/.xls) or CSV file and convert it to a Google Spreadsheet.
+
+    Args:
+        file_path: Local file path to the Excel or CSV file
+        title: Optional title for the new spreadsheet (defaults to the filename)
+        folder_id: Optional Google Drive folder ID to place the file in
+
+    Returns:
+        The created spreadsheet's ID, title, and URL
+    """
+    from googleapiclient.http import MediaFileUpload
+    import mimetypes
+
+    drive_service = ctx.request_context.lifespan_context.drive_service
+    target_folder = folder_id or ctx.request_context.lifespan_context.folder_id
+
+    if not os.path.exists(file_path):
+        return {"error": f"File not found: {file_path}"}
+
+    basename = os.path.basename(file_path)
+    name = title or os.path.splitext(basename)[0]
+
+    mime_map = {
+        ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ".xls": "application/vnd.ms-excel",
+        ".csv": "text/csv",
+    }
+    ext = os.path.splitext(basename)[1].lower()
+    upload_mime = mime_map.get(ext) or mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+
+    file_metadata: Dict[str, Any] = {
+        "name": name,
+        "mimeType": "application/vnd.google-apps.spreadsheet",  # auto-convert
+    }
+    if target_folder:
+        file_metadata["parents"] = [target_folder]
+
+    try:
+        media = MediaFileUpload(file_path, mimetype=upload_mime, resumable=True)
+        created = drive_service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields="id,name,webViewLink",
+        ).execute()
+        return {
+            "success": True,
+            "spreadsheet_id": created["id"],
+            "title": created["name"],
+            "url": created.get("webViewLink"),
+        }
+    except Exception as e:
+        return {"error": f"Upload failed: {str(e)}"}
+
+
+@tool(
+    annotations=ToolAnnotations(
+        title="Export Sheet",
+        readOnlyHint=True,
+    ),
+)
+def export_sheet(
+    spreadsheet_id: str,
+    format: str = "xlsx",
+    output_path: Optional[str] = None,
+    ctx: Context = None,
+) -> Dict[str, Any]:
+    """
+    Export (download) a Google Spreadsheet as Excel, CSV, or PDF.
+
+    Args:
+        spreadsheet_id: The ID of the spreadsheet
+        format: Export format — 'xlsx', 'csv', 'pdf', or 'ods'
+        output_path: Local file path to save to. Auto-generated if omitted.
+
+    Returns:
+        The local file path where the file was saved
+    """
+    drive_service = ctx.request_context.lifespan_context.drive_service
+
+    mime_map = {
+        "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "csv": "text/csv",
+        "pdf": "application/pdf",
+        "ods": "application/vnd.oasis.opendocument.spreadsheet",
+    }
+    export_mime = mime_map.get(format.lower())
+    if not export_mime:
+        return {"error": f"Unsupported format: {format}. Use xlsx, csv, pdf, or ods."}
+
+    try:
+        # Get spreadsheet title for default filename
+        meta = drive_service.files().get(fileId=spreadsheet_id, fields="name").execute()
+        default_name = meta.get("name", spreadsheet_id)
+
+        if not output_path:
+            output_path = f"{default_name}.{format.lower()}"
+
+        from googleapiclient.http import MediaIoBaseDownload
+        import io
+
+        request = drive_service.files().export_media(fileId=spreadsheet_id, mimeType=export_mime)
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+
+        with open(output_path, "wb") as f:
+            f.write(fh.getvalue())
+
+        return {"success": True, "file_path": os.path.abspath(output_path), "format": format}
+    except Exception as e:
+        return {"error": f"Export failed: {str(e)}"}
+
+
+@tool(
+    annotations=ToolAnnotations(
+        title="Format Cells",
+        destructiveHint=True,
+    ),
+)
+def format_cells(
+    spreadsheet_id: str,
+    sheet: str,
+    range: str,
+    bold: Optional[bool] = None,
+    italic: Optional[bool] = None,
+    font_size: Optional[int] = None,
+    font_color: Optional[str] = None,
+    background_color: Optional[str] = None,
+    number_format: Optional[str] = None,
+    horizontal_alignment: Optional[str] = None,
+    ctx: Context = None,
+) -> Dict[str, Any]:
+    """
+    Apply formatting to a range of cells.
+
+    Args:
+        spreadsheet_id: The ID of the spreadsheet
+        sheet: Sheet/tab name
+        range: A1 notation range (e.g., 'A1:C10')
+        bold: Make text bold
+        italic: Make text italic
+        font_size: Font size in pt
+        font_color: Hex color for text (e.g., '#FF0000')
+        background_color: Hex color for cell background (e.g., '#FFFF00')
+        number_format: Number format pattern (e.g., '#,##0.00', '0%', 'yyyy-mm-dd')
+        horizontal_alignment: 'LEFT', 'CENTER', or 'RIGHT'
+
+    Returns:
+        Result of the formatting operation
+    """
+    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+    if sheet_id is None:
+        return {"error": f"Sheet '{sheet}' not found"}
+
+    def hex_to_color(hex_str: str) -> Dict[str, float]:
+        h = hex_str.lstrip("#")
+        return {
+            "red": int(h[0:2], 16) / 255.0,
+            "green": int(h[2:4], 16) / 255.0,
+            "blue": int(h[4:6], 16) / 255.0,
+        }
+
+    cell_format: Dict[str, Any] = {}
+    fields = []
+
+    text_format: Dict[str, Any] = {}
+    if bold is not None:
+        text_format["bold"] = bold
+        fields.append("userEnteredFormat.textFormat.bold")
+    if italic is not None:
+        text_format["italic"] = italic
+        fields.append("userEnteredFormat.textFormat.italic")
+    if font_size is not None:
+        text_format["fontSize"] = font_size
+        fields.append("userEnteredFormat.textFormat.fontSize")
+    if font_color is not None:
+        text_format["foregroundColorStyle"] = {"rgbColor": hex_to_color(font_color)}
+        fields.append("userEnteredFormat.textFormat.foregroundColorStyle")
+    if text_format:
+        cell_format["textFormat"] = text_format
+
+    if background_color is not None:
+        cell_format["backgroundColorStyle"] = {"rgbColor": hex_to_color(background_color)}
+        fields.append("userEnteredFormat.backgroundColorStyle")
+
+    if number_format is not None:
+        cell_format["numberFormat"] = {"type": "NUMBER", "pattern": number_format}
+        fields.append("userEnteredFormat.numberFormat")
+
+    if horizontal_alignment is not None:
+        cell_format["horizontalAlignment"] = horizontal_alignment.upper()
+        fields.append("userEnteredFormat.horizontalAlignment")
+
+    if not fields:
+        return {"error": "No formatting options specified"}
+
+    grid_range = {"sheetId": sheet_id}
+    grid_range.update(_parse_a1_notation(range))
+
+    try:
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={
+                "requests": [{
+                    "repeatCell": {
+                        "range": grid_range,
+                        "cell": {"userEnteredFormat": cell_format},
+                        "fields": ",".join(fields),
+                    }
+                }]
+            },
+        ).execute()
+        return {"success": True, "updatedCells": result.get("replies", [{}])[0]}
+    except Exception as e:
+        return {"error": f"Format failed: {str(e)}"}
+
+
+@tool(
+    annotations=ToolAnnotations(
+        title="Merge Cells",
+        destructiveHint=True,
+    ),
+)
+def merge_cells(
+    spreadsheet_id: str,
+    sheet: str,
+    range: str,
+    merge_type: str = "MERGE_ALL",
+    ctx: Context = None,
+) -> Dict[str, Any]:
+    """
+    Merge (or unmerge) cells in a range.
+
+    Args:
+        spreadsheet_id: The ID of the spreadsheet
+        sheet: Sheet/tab name
+        range: A1 notation range (e.g., 'A1:C3')
+        merge_type: 'MERGE_ALL', 'MERGE_COLUMNS', 'MERGE_ROWS', or 'UNMERGE'
+
+    Returns:
+        Result of the merge operation
+    """
+    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+    if sheet_id is None:
+        return {"error": f"Sheet '{sheet}' not found"}
+
+    grid_range = {"sheetId": sheet_id}
+    grid_range.update(_parse_a1_notation(range))
+
+    if merge_type.upper() == "UNMERGE":
+        request = {"unmergeCells": {"range": grid_range}}
+    else:
+        request = {"mergeCells": {"range": grid_range, "mergeType": merge_type.upper()}}
+
+    try:
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id, body={"requests": [request]}
+        ).execute()
+        return {"success": True, "result": result}
+    except Exception as e:
+        return {"error": f"Merge failed: {str(e)}"}
+
+
+@tool(
+    annotations=ToolAnnotations(
+        title="Auto Resize Columns/Rows",
+        destructiveHint=True,
+    ),
+)
+def auto_resize(
+    spreadsheet_id: str,
+    sheet: str,
+    dimension: str = "COLUMNS",
+    start_index: int = 0,
+    end_index: Optional[int] = None,
+    ctx: Context = None,
+) -> Dict[str, Any]:
+    """
+    Auto-resize columns or rows to fit content.
+
+    Args:
+        spreadsheet_id: The ID of the spreadsheet
+        sheet: Sheet/tab name
+        dimension: 'COLUMNS' or 'ROWS'
+        start_index: 0-based start index
+        end_index: 0-based end index (exclusive). Omit to resize all.
+
+    Returns:
+        Result of the resize operation
+    """
+    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+    if sheet_id is None:
+        return {"error": f"Sheet '{sheet}' not found"}
+
+    dims: Dict[str, Any] = {
+        "sheetId": sheet_id,
+        "dimension": dimension.upper(),
+        "startIndex": start_index,
+    }
+    if end_index is not None:
+        dims["endIndex"] = end_index
+
+    try:
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{"autoResizeDimensions": {"dimensions": dims}}]},
+        ).execute()
+        return {"success": True, "result": result}
+    except Exception as e:
+        return {"error": f"Auto-resize failed: {str(e)}"}
+
+
+@tool(
+    annotations=ToolAnnotations(
+        title="Sort Range",
+        destructiveHint=True,
+    ),
+)
+def sort_range(
+    spreadsheet_id: str,
+    sheet: str,
+    range: str,
+    sort_column: str,
+    order: str = "ASCENDING",
+    ctx: Context = None,
+) -> Dict[str, Any]:
+    """
+    Sort a range of cells by a column.
+
+    Args:
+        spreadsheet_id: The ID of the spreadsheet
+        sheet: Sheet/tab name
+        range: A1 notation range to sort (e.g., 'A1:D100')
+        sort_column: Column letter to sort by (e.g., 'B')
+        order: 'ASCENDING' or 'DESCENDING'
+
+    Returns:
+        Result of the sort operation
+    """
+    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+    if sheet_id is None:
+        return {"error": f"Sheet '{sheet}' not found"}
+
+    grid_range = {"sheetId": sheet_id}
+    grid_range.update(_parse_a1_notation(range))
+
+    col_index = _letter_to_column_index(sort_column)
+
+    try:
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={
+                "requests": [{
+                    "sortRange": {
+                        "range": grid_range,
+                        "sortSpecs": [{
+                            "dimensionIndex": col_index,
+                            "sortOrder": order.upper(),
+                        }],
+                    }
+                }]
+            },
+        ).execute()
+        return {"success": True, "result": result}
+    except Exception as e:
+        return {"error": f"Sort failed: {str(e)}"}
+
+
+@tool(
+    annotations=ToolAnnotations(
+        title="Add Basic Filter",
+        destructiveHint=True,
+    ),
+)
+def add_filter(
+    spreadsheet_id: str,
+    sheet: str,
+    range: str,
+    ctx: Context = None,
+) -> Dict[str, Any]:
+    """
+    Add a basic filter (auto-filter) to a range.
+
+    Args:
+        spreadsheet_id: The ID of the spreadsheet
+        sheet: Sheet/tab name
+        range: A1 notation range (e.g., 'A1:E100')
+
+    Returns:
+        Result of the filter operation
+    """
+    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+    if sheet_id is None:
+        return {"error": f"Sheet '{sheet}' not found"}
+
+    grid_range = {"sheetId": sheet_id}
+    grid_range.update(_parse_a1_notation(range))
+
+    try:
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{"setBasicFilter": {"filter": {"range": grid_range}}}]},
+        ).execute()
+        return {"success": True, "result": result}
+    except Exception as e:
+        return {"error": f"Add filter failed: {str(e)}"}
+
+
+@tool(
+    annotations=ToolAnnotations(
+        title="Add Pivot Table",
+        destructiveHint=True,
+    ),
+)
+def add_pivot_table(
+    spreadsheet_id: str,
+    source_sheet: str,
+    source_range: str,
+    target_sheet: str,
+    target_cell: str = "A1",
+    row_columns: Optional[List[int]] = None,
+    value_columns: Optional[List[int]] = None,
+    aggregation: str = "SUM",
+    ctx: Context = None,
+) -> Dict[str, Any]:
+    """
+    Create a pivot table from source data.
+
+    Args:
+        spreadsheet_id: The ID of the spreadsheet
+        source_sheet: Sheet name containing source data
+        source_range: A1 range of source data (e.g., 'A1:E100')
+        target_sheet: Sheet name to place the pivot table
+        target_cell: Cell to anchor the pivot table (default 'A1')
+        row_columns: List of 0-based column indices for row grouping (e.g., [0, 1])
+        value_columns: List of 0-based column indices to aggregate (e.g., [3, 4])
+        aggregation: Aggregation function — 'SUM', 'COUNTA', 'AVERAGE', 'MAX', 'MIN'
+
+    Returns:
+        Result of the pivot table creation
+    """
+    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    source_sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, source_sheet)
+    target_sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, target_sheet)
+
+    if source_sheet_id is None:
+        return {"error": f"Source sheet '{source_sheet}' not found"}
+    if target_sheet_id is None:
+        return {"error": f"Target sheet '{target_sheet}' not found"}
+
+    source_grid = {"sheetId": source_sheet_id}
+    source_grid.update(_parse_a1_notation(source_range))
+
+    target_parsed = _parse_a1_notation(target_cell)
+
+    rows = [{"sourceColumnOffset": c, "showTotals": True, "sortOrder": "ASCENDING"} for c in (row_columns or [0])]
+    values = [{"sourceColumnOffset": c, "summarizeFunction": aggregation.upper()} for c in (value_columns or [1])]
+
+    try:
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={
+                "requests": [{
+                    "updateCells": {
+                        "rows": [{"values": [{"pivotTable": {
+                            "source": source_grid,
+                            "rows": rows,
+                            "values": values,
+                        }}]}],
+                        "start": {
+                            "sheetId": target_sheet_id,
+                            "rowIndex": target_parsed.get("startRowIndex", 0),
+                            "columnIndex": target_parsed.get("startColumnIndex", 0),
+                        },
+                        "fields": "pivotTable",
+                    }
+                }]
+            },
+        ).execute()
+        return {"success": True, "result": result}
+    except Exception as e:
+        return {"error": f"Pivot table failed: {str(e)}"}
+
+
+@tool(
+    annotations=ToolAnnotations(
+        title="Add Conditional Formatting",
+        destructiveHint=True,
+    ),
+)
+def add_conditional_format(
+    spreadsheet_id: str,
+    sheet: str,
+    range: str,
+    rule_type: str = "NUMBER_GREATER",
+    values: Optional[List[str]] = None,
+    background_color: str = "#FF0000",
+    ctx: Context = None,
+) -> Dict[str, Any]:
+    """
+    Add a conditional formatting rule to a range.
+
+    Args:
+        spreadsheet_id: The ID of the spreadsheet
+        sheet: Sheet/tab name
+        range: A1 notation range (e.g., 'B2:B100')
+        rule_type: Condition type — 'NUMBER_GREATER', 'NUMBER_LESS', 'NUMBER_EQ',
+                   'TEXT_CONTAINS', 'TEXT_NOT_CONTAINS', 'BLANK', 'NOT_BLANK',
+                   'NUMBER_BETWEEN', 'NUMBER_NOT_BETWEEN'
+        values: Condition values (e.g., ['100'] for greater than 100, ['10','50'] for between)
+        background_color: Hex color to apply when condition is met (e.g., '#FF0000')
+
+    Returns:
+        Result of the conditional formatting operation
+    """
+    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+    if sheet_id is None:
+        return {"error": f"Sheet '{sheet}' not found"}
+
+    grid_range = {"sheetId": sheet_id}
+    grid_range.update(_parse_a1_notation(range))
+
+    def hex_to_color(hex_str: str) -> Dict[str, float]:
+        h = hex_str.lstrip("#")
+        return {
+            "red": int(h[0:2], 16) / 255.0,
+            "green": int(h[2:4], 16) / 255.0,
+            "blue": int(h[4:6], 16) / 255.0,
+        }
+
+    condition_values = [{"userEnteredValue": v} for v in (values or [])]
+
+    try:
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={
+                "requests": [{
+                    "addConditionalFormatRule": {
+                        "rule": {
+                            "ranges": [grid_range],
+                            "booleanRule": {
+                                "condition": {
+                                    "type": rule_type.upper(),
+                                    "values": condition_values,
+                                },
+                                "format": {
+                                    "backgroundColor": hex_to_color(background_color),
+                                },
+                            },
+                        },
+                        "index": 0,
+                    }
+                }]
+            },
+        ).execute()
+        return {"success": True, "result": result}
+    except Exception as e:
+        return {"error": f"Conditional format failed: {str(e)}"}
+
+
+@tool(
+    annotations=ToolAnnotations(
+        title="Duplicate Sheet",
+        destructiveHint=True,
+    ),
+)
+def duplicate_sheet(
+    spreadsheet_id: str,
+    sheet: str,
+    new_name: Optional[str] = None,
+    ctx: Context = None,
+) -> Dict[str, Any]:
+    """
+    Duplicate a sheet/tab within the same spreadsheet.
+
+    Args:
+        spreadsheet_id: The ID of the spreadsheet
+        sheet: Name of the sheet to duplicate
+        new_name: Name for the duplicated sheet (defaults to 'Copy of <sheet>')
+
+    Returns:
+        The new sheet's properties
+    """
+    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+    if sheet_id is None:
+        return {"error": f"Sheet '{sheet}' not found"}
+
+    try:
+        requests = [{"duplicateSheet": {"sourceSheetId": sheet_id, "newSheetName": new_name or f"Copy of {sheet}"}}]
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id, body={"requests": requests}
+        ).execute()
+        new_props = result.get("replies", [{}])[0].get("duplicateSheet", {}).get("properties", {})
+        return {"success": True, "new_sheet": new_props}
+    except Exception as e:
+        return {"error": f"Duplicate failed: {str(e)}"}
+
+
+@tool(
+    annotations=ToolAnnotations(
+        title="Move Sheet (Reorder Tab)",
+        destructiveHint=True,
+    ),
+)
+def move_sheet(
+    spreadsheet_id: str,
+    sheet: str,
+    index: int,
+    ctx: Context = None,
+) -> Dict[str, Any]:
+    """
+    Move a sheet/tab to a different position (reorder tabs).
+
+    Args:
+        spreadsheet_id: The ID of the spreadsheet
+        sheet: Name of the sheet to move
+        index: New 0-based position index
+
+    Returns:
+        Result of the move operation
+    """
+    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+    if sheet_id is None:
+        return {"error": f"Sheet '{sheet}' not found"}
+
+    try:
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={
+                "requests": [{
+                    "updateSheetProperties": {
+                        "properties": {"sheetId": sheet_id, "index": index},
+                        "fields": "index",
+                    }
+                }]
+            },
+        ).execute()
+        return {"success": True, "result": result}
+    except Exception as e:
+        return {"error": f"Move failed: {str(e)}"}
+
+
+@tool(
+    annotations=ToolAnnotations(
+        title="Protect Range",
+        destructiveHint=True,
+    ),
+)
+def protect_range(
+    spreadsheet_id: str,
+    sheet: str,
+    range: Optional[str] = None,
+    description: str = "",
+    warning_only: bool = False,
+    editors: Optional[List[str]] = None,
+    ctx: Context = None,
+) -> Dict[str, Any]:
+    """
+    Protect a range or entire sheet from editing.
+
+    Args:
+        spreadsheet_id: The ID of the spreadsheet
+        sheet: Sheet/tab name
+        range: A1 notation range to protect. Omit to protect the entire sheet.
+        description: Description of the protection
+        warning_only: If True, shows a warning but allows editing
+        editors: List of email addresses allowed to edit
+
+    Returns:
+        Result of the protection operation
+    """
+    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+    if sheet_id is None:
+        return {"error": f"Sheet '{sheet}' not found"}
+
+    protected: Dict[str, Any] = {
+        "description": description,
+        "warningOnly": warning_only,
+    }
+
+    if range:
+        grid_range = {"sheetId": sheet_id}
+        grid_range.update(_parse_a1_notation(range))
+        protected["range"] = grid_range
+    else:
+        protected["range"] = {"sheetId": sheet_id}
+
+    if editors:
+        protected["editors"] = {"users": editors}
+
+    try:
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{"addProtectedRange": {"protectedRange": protected}}]},
+        ).execute()
+        return {"success": True, "result": result}
+    except Exception as e:
+        return {"error": f"Protect failed: {str(e)}"}
+
+
+@tool(
+    annotations=ToolAnnotations(
+        title="Add Comment",
+        destructiveHint=True,
+    ),
+)
+def add_comment(
+    spreadsheet_id: str,
+    content: str,
+    anchor_cell: Optional[str] = None,
+    ctx: Context = None,
+) -> Dict[str, Any]:
+    """
+    Add a comment to a spreadsheet. Optionally anchor it to a specific cell.
+
+    Args:
+        spreadsheet_id: The ID of the spreadsheet
+        content: The comment text
+        anchor_cell: Cell reference in 'Sheet1!A1' format. If omitted, adds a file-level comment.
+
+    Returns:
+        The created comment
+    """
+    drive_service = ctx.request_context.lifespan_context.drive_service
+
+    body: Dict[str, Any] = {"content": content}
+    if anchor_cell:
+        body["anchor"] = f"cell={anchor_cell}"
+
+    try:
+        result = drive_service.comments().create(
+            fileId=spreadsheet_id,
+            body=body,
+            fields="id,content,author,createdTime,anchor",
+        ).execute()
+        return {"success": True, "comment": result}
+    except Exception as e:
+        return {"error": f"Add comment failed: {str(e)}"}
+
+
+@tool(
+    annotations=ToolAnnotations(
+        title="Get Revision History",
+        readOnlyHint=True,
+    ),
+)
+def get_revision_history(
+    spreadsheet_id: str,
+    max_results: int = 20,
+    ctx: Context = None,
+) -> Dict[str, Any]:
+    """
+    Get the revision (edit) history of a spreadsheet.
+
+    Args:
+        spreadsheet_id: The ID of the spreadsheet
+        max_results: Maximum number of revisions to return (default 20)
+
+    Returns:
+        List of revisions with author, date, and modification details
+    """
+    drive_service = ctx.request_context.lifespan_context.drive_service
+
+    try:
+        revisions = drive_service.revisions().list(
+            fileId=spreadsheet_id,
+            pageSize=max_results,
+            fields="revisions(id,modifiedTime,lastModifyingUser(displayName,emailAddress))",
+        ).execute()
+        return {
+            "success": True,
+            "revisions": revisions.get("revisions", []),
+            "count": len(revisions.get("revisions", [])),
+        }
+    except Exception as e:
+        return {"error": f"Get revisions failed: {str(e)}"}
+
+
+@tool(
+    annotations=ToolAnnotations(
+        title="Delete Rows or Columns",
+        destructiveHint=True,
+    ),
+)
+def delete_rows_columns(
+    spreadsheet_id: str,
+    sheet: str,
+    dimension: str,
+    start_index: int,
+    end_index: int,
+    ctx: Context = None,
+) -> Dict[str, Any]:
+    """
+    Delete rows or columns from a sheet.
+
+    Args:
+        spreadsheet_id: The ID of the spreadsheet
+        sheet: Sheet/tab name
+        dimension: 'ROWS' or 'COLUMNS'
+        start_index: 0-based start index (inclusive)
+        end_index: 0-based end index (exclusive)
+
+    Returns:
+        Result of the delete operation
+    """
+    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+    if sheet_id is None:
+        return {"error": f"Sheet '{sheet}' not found"}
+
+    try:
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={
+                "requests": [{
+                    "deleteDimension": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "dimension": dimension.upper(),
+                            "startIndex": start_index,
+                            "endIndex": end_index,
+                        }
+                    }
+                }]
+            },
+        ).execute()
+        return {"success": True, "result": result}
+    except Exception as e:
+        return {"error": f"Delete failed: {str(e)}"}
+
+
+@tool(
+    annotations=ToolAnnotations(
+        title="Clear Range",
+        destructiveHint=True,
+    ),
+)
+def clear_range(
+    spreadsheet_id: str,
+    sheet: str,
+    range: str,
+    clear_format: bool = False,
+    ctx: Context = None,
+) -> Dict[str, Any]:
+    """
+    Clear data from a range of cells. Optionally clear formatting too.
+
+    Args:
+        spreadsheet_id: The ID of the spreadsheet
+        sheet: Sheet/tab name
+        range: A1 notation range (e.g., 'A1:C10')
+        clear_format: If True, also clears formatting. If False (default), only clears values.
+
+    Returns:
+        Result of the clear operation
+    """
+    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    full_range = f"{sheet}!{range}"
+
+    try:
+        if clear_format:
+            # Use batchUpdate to clear both values and formatting
+            sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+            if sheet_id is None:
+                return {"error": f"Sheet '{sheet}' not found"}
+
+            grid_range = {"sheetId": sheet_id}
+            grid_range.update(_parse_a1_notation(range))
+
+            result = sheets_service.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={
+                    "requests": [{
+                        "updateCells": {
+                            "range": grid_range,
+                            "fields": "userEnteredValue,userEnteredFormat",
+                        }
+                    }]
+                },
+            ).execute()
+        else:
+            # Only clear values, keep formatting
+            result = sheets_service.spreadsheets().values().clear(
+                spreadsheetId=spreadsheet_id,
+                range=full_range,
+            ).execute()
+
+        return {"success": True, "clearedRange": full_range, "result": result}
+    except Exception as e:
+        return {"error": f"Clear failed: {str(e)}"}
+
+
+@tool(
+    annotations=ToolAnnotations(
+        title="Get Comments",
+        readOnlyHint=True,
+    ),
+)
+def get_comments(
+    spreadsheet_id: str,
+    include_resolved: bool = False,
+    max_results: int = 50,
+    ctx: Context = None,
+) -> Dict[str, Any]:
+    """
+    Get all comments on a spreadsheet.
+
+    Args:
+        spreadsheet_id: The ID of the spreadsheet
+        include_resolved: Whether to include resolved comments (default False)
+        max_results: Maximum number of comments to return (default 50)
+
+    Returns:
+        List of comments with author, content, anchor cell, and resolved status
+    """
+    drive_service = ctx.request_context.lifespan_context.drive_service
+
+    try:
+        comments = drive_service.comments().list(
+            fileId=spreadsheet_id,
+            pageSize=max_results,
+            includeDeleted=False,
+            fields="comments(id,content,author(displayName,emailAddress),createdTime,modifiedTime,resolved,anchor,replies(id,content,author(displayName,emailAddress),createdTime))",
+        ).execute()
+
+        result_comments = []
+        for c in comments.get("comments", []):
+            if not include_resolved and c.get("resolved"):
+                continue
+            result_comments.append({
+                "id": c.get("id"),
+                "content": c.get("content"),
+                "author": c.get("author", {}).get("displayName"),
+                "author_email": c.get("author", {}).get("emailAddress"),
+                "created": c.get("createdTime"),
+                "resolved": c.get("resolved", False),
+                "anchor": c.get("anchor"),
+                "replies": [
+                    {
+                        "content": r.get("content"),
+                        "author": r.get("author", {}).get("displayName"),
+                        "created": r.get("createdTime"),
+                    }
+                    for r in c.get("replies", [])
+                ],
+            })
+
+        return {
+            "success": True,
+            "comments": result_comments,
+            "count": len(result_comments),
+        }
+    except Exception as e:
+        return {"error": f"Get comments failed: {str(e)}"}
+
+
+@tool(
+    annotations=ToolAnnotations(
+        title="Resolve Comment",
+        destructiveHint=True,
+    ),
+)
+def resolve_comment(
+    spreadsheet_id: str,
+    comment_id: str,
+    reply_content: Optional[str] = None,
+    ctx: Context = None,
+) -> Dict[str, Any]:
+    """
+    Resolve a comment, optionally adding a reply before resolving.
+
+    Args:
+        spreadsheet_id: The ID of the spreadsheet
+        comment_id: The comment ID (from get_comments)
+        reply_content: Optional reply to add before resolving
+
+    Returns:
+        Result of the resolve operation
+    """
+    drive_service = ctx.request_context.lifespan_context.drive_service
+
+    try:
+        # Add reply if provided
+        if reply_content:
+            drive_service.replies().create(
+                fileId=spreadsheet_id,
+                commentId=comment_id,
+                body={"content": reply_content},
+                fields="id",
+            ).execute()
+
+        # Resolve the comment by updating it
+        result = drive_service.comments().update(
+            fileId=spreadsheet_id,
+            commentId=comment_id,
+            body={"resolved": True},
+            fields="id,resolved",
+        ).execute()
+
+        return {"success": True, "comment_id": comment_id, "resolved": True}
+    except Exception as e:
+        return {"error": f"Resolve comment failed: {str(e)}"}
+
+
+@tool(
+    annotations=ToolAnnotations(
+        title="Set Tab Color",
+        destructiveHint=True,
+    ),
+)
+def set_tab_color(
+    spreadsheet_id: str,
+    sheet: str,
+    color: str,
+    ctx: Context = None,
+) -> Dict[str, Any]:
+    """
+    Change the color of a sheet tab.
+
+    Args:
+        spreadsheet_id: The ID of the spreadsheet
+        sheet: Sheet/tab name
+        color: Hex color (e.g., '#FF0000' for red, '#00FF00' for green). Use '#FFFFFF' or 'none' to remove color.
+
+    Returns:
+        Result of the color change operation
+    """
+    sheets_service = ctx.request_context.lifespan_context.sheets_service
+    sheet_id = _get_sheet_id(sheets_service, spreadsheet_id, sheet)
+    if sheet_id is None:
+        return {"error": f"Sheet '{sheet}' not found"}
+
+    if color.lower() == "none":
+        tab_color = {"red": 1.0, "green": 1.0, "blue": 1.0}
+    else:
+        h = color.lstrip("#")
+        tab_color = {
+            "red": int(h[0:2], 16) / 255.0,
+            "green": int(h[2:4], 16) / 255.0,
+            "blue": int(h[4:6], 16) / 255.0,
+        }
+
+    try:
+        result = sheets_service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={
+                "requests": [{
+                    "updateSheetProperties": {
+                        "properties": {
+                            "sheetId": sheet_id,
+                            "tabColorStyle": {"rgbColor": tab_color},
+                        },
+                        "fields": "tabColorStyle",
+                    }
+                }]
+            },
+        ).execute()
+        return {"success": True, "result": result}
+    except Exception as e:
+        return {"error": f"Set tab color failed: {str(e)}"}
+
+
+@tool(
+    annotations=ToolAnnotations(
+        title="Append Rows",
+        destructiveHint=True,
+    ),
+)
+def append_rows(
+    spreadsheet_id: str,
+    sheet: str,
+    values: List[List[Any]],
+    ctx: Context = None,
+) -> Dict[str, Any]:
+    """
+    Append rows of data after the last row with content in a sheet.
+    Useful for adding log entries or new records without knowing the exact row number.
+
+    Args:
+        spreadsheet_id: The ID of the spreadsheet
+        sheet: Sheet/tab name
+        values: List of rows, each row is a list of cell values.
+                Example: [["Alice", 30, "Seoul"], ["Bob", 25, "Busan"]]
+
+    Returns:
+        The range where data was appended and number of rows added
+    """
+    sheets_service = ctx.request_context.lifespan_context.sheets_service
+
+    try:
+        result = sheets_service.spreadsheets().values().append(
+            spreadsheetId=spreadsheet_id,
+            range=f"{sheet}!A1",
+            valueInputOption="USER_ENTERED",
+            insertDataOption="INSERT_ROWS",
+            body={"values": values},
+        ).execute()
+
+        updates = result.get("updates", {})
+        return {
+            "success": True,
+            "updatedRange": updates.get("updatedRange"),
+            "updatedRows": updates.get("updatedRows"),
+            "updatedCells": updates.get("updatedCells"),
+        }
+    except Exception as e:
+        return {"error": f"Append rows failed: {str(e)}"}
+
+
 def main():
     # Log tool filtering configuration if enabled
     if ENABLED_TOOLS is not None:

@@ -1,35 +1,36 @@
 [project]
-name = "mcp-google-sheets"
-dynamic = ["version"]
-description = "This MCP server integrates with your Google Drive and Google Sheets, to enable creating and modifying spreadsheets."
+name = "mcp-google-sheets-extended"
+version = "0.7.0"
+description = "Extended Google Sheets MCP server — upload Excel, export, formatting, pivot tables, comments, and more. Based on mcp-google-sheets by Xing Wu."
 readme = "README.md"
 requires-python = ">=3.10"
+license = "MIT"
 dependencies = [
     "mcp>=1.8.0",
     "google-auth>=2.28.1",
     "google-auth-oauthlib>=1.2.0",
     "google-api-python-client>=2.117.0",
 ]
+
+[[project.authors]]
+name = "Edwin Park"
+email = "edwin@socar.kr"
+
 [[project.authors]]
 name = "Xing Wu"
 email = "xingwu.cs@gmail.com"
 
 [project.urls]
-"Homepage" = "https://github.com/xing5/mcp-google-sheets"
-"Bug Tracker" = "https://github.com/xing5/mcp-google-sheets/issues"
-"Repository" = "https://github.com/xing5/mcp-google-sheets.git"
+"Homepage" = "https://github.com/socar-edwin/mcp-google-sheets-extended"
+"Bug Tracker" = "https://github.com/socar-edwin/mcp-google-sheets-extended/issues"
+"Repository" = "https://github.com/socar-edwin/mcp-google-sheets-extended.git"
 
 [build-system]
-requires = ["hatchling", "uv-dynamic-versioning"]
+requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.hatch.version]
-source = "uv-dynamic-versioning"
-
-[tool.uv-dynamic-versioning]
-pattern = "default"
-strict = true
-fallback-version = "0.0.0"
+[tool.hatch.build.targets.wheel]
+packages = ["src/mcp_google_sheets"]
 
 [project.scripts]
-mcp-google-sheets = "mcp_google_sheets:main"
+mcp-google-sheets-extended = "mcp_google_sheets:main"
